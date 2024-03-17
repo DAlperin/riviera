@@ -109,15 +109,15 @@ impl TreeNode for LogicalPlan {
     {
         Ok(match self {
             Self::Projection(proj) => {
-                let input = f(&*proj.input)?;
+                let input = f(&proj.input)?;
                 Self::Projection(Projection {
                     input: Box::new(input),
                     ..proj.clone()
                 })
             }
             Self::Join(join) => {
-                let left = f(&*join.left)?;
-                let right = f(&*join.right)?;
+                let left = f(&join.left)?;
+                let right = f(&join.right)?;
                 Self::Join(Join {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -125,21 +125,21 @@ impl TreeNode for LogicalPlan {
                 })
             }
             Self::Sort(sort) => {
-                let input = f(&*sort.input)?;
+                let input = f(&sort.input)?;
                 Self::Sort(Sort {
                     input: Box::new(input),
                     ..sort.clone()
                 })
             }
             Self::Aggregate(aggr) => {
-                let input = f(&*aggr.input)?;
+                let input = f(&aggr.input)?;
                 Self::Aggregate(Aggregate {
                     input: Box::new(input),
                     ..aggr.clone()
                 })
             }
             Self::SubqueryAlias(subq) => {
-                let plan = f(&*subq.plan)?;
+                let plan = f(&subq.plan)?;
                 Self::SubqueryAlias(SubqueryAlias {
                     plan: Box::new(plan),
                     alias: subq.alias.clone(),

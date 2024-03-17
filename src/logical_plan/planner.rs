@@ -44,9 +44,8 @@ impl RivieraPlanner {
     fn plan_select(&self, select: Select) -> Result<LogicalPlan, String> {
         let from = self.plan_from(&select.from).unwrap();
         let select_exprs = self.build_select_exprs(&select.projection, from.schema())?;
-        let agg_exprs = find_exprs_in_exprs(&select_exprs, |expr| match expr {
-            Expr::AggregateFunction(_) => true,
-            _ => false,
+        let agg_exprs = find_exprs_in_exprs(&select_exprs, |expr| {
+            matches!(expr, Expr::AggregateFunction(_))
         });
         let group_by_exprs = if let GroupByExpr::Expressions(group_by_exprs) = select.group_by {
             group_by_exprs
@@ -62,7 +61,7 @@ impl RivieraPlanner {
         let mut plan = from.clone();
         let mut select_exprs = select_exprs.clone();
 
-        if agg_exprs.len() > 0 || group_by_exprs.len() > 0 {
+        if !agg_exprs.is_empty() || !group_by_exprs.is_empty() {
             (plan, select_exprs) = self
                 .aggregate(&select_exprs, &agg_exprs, &group_by_exprs, &from)
                 .unwrap();
@@ -75,12 +74,12 @@ impl RivieraPlanner {
 
     fn aggregate(
         &self,
-        select_exprs: &Vec<Expr>,
-        aggr_exprs: &Vec<Expr>,
-        group_exprs: &Vec<Expr>,
+        select_exprs: &[Expr],
+        aggr_exprs: &[Expr],
+        group_exprs: &[Expr],
         input: &LogicalPlan,
     ) -> Result<(LogicalPlan, Vec<Expr>), String> {
-        let mut all_exprs = aggr_exprs.clone();
+        let mut all_exprs = Vec::from(aggr_exprs);
         all_exprs.extend_from_slice(group_exprs);
         let fields = all_exprs
             .iter()
@@ -95,8 +94,8 @@ impl RivieraPlanner {
 
         let plan = LogicalPlan::Aggregate(Aggregate {
             input: Box::new(input.clone()),
-            aggr_expr: aggr_exprs.clone(),
-            group_expr: group_exprs.clone(),
+            aggr_expr: Vec::from(aggr_exprs),
+            group_expr: Vec::from(group_exprs),
             schema: Box::new(schema),
         });
 
@@ -106,11 +105,9 @@ impl RivieraPlanner {
     fn plan_join_table(&self, table: &TableWithJoins) -> Result<LogicalPlan, String> {
         let left = self.plan_relation(&table.relation)?;
         match table.joins.len() {
-            0 => return Ok(left),
-            1 => {
-                return self.plan_join(&left, &table.joins[0]);
-            }
-            _ => return Err("only one join is supported".to_string()),
+            0 => Ok(left),
+            1 => self.plan_join(&left, &table.joins[0]),
+            _ => Err("only one join is supported".to_string()),
         }
     }
 
@@ -139,7 +136,7 @@ impl RivieraPlanner {
         match relation {
             TableFactor::Table { name, .. } => {
                 let table_name = name.to_string();
-                let schema = match self.table_provider.tables.get(&table_name).clone() {
+                let schema = match self.table_provider.tables.get(&table_name) {
                     Some(schema) => schema,
                     None => return Err(format!("no table named {}", table_name)),
                 };
@@ -173,10 +170,10 @@ impl RivieraPlanner {
         }
     }
 
-    fn plan_from(&self, from: &Vec<TableWithJoins>) -> Result<LogicalPlan, String> {
+    fn plan_from(&self, from: &[TableWithJoins]) -> Result<LogicalPlan, String> {
         match from.len() {
             0 => Err("no tables".to_string()),
-            1 => return self.plan_join_table(&from[0]),
+            1 => self.plan_join_table(&from[0]),
             //TODO: Do an implicit cross join here
             _ => Err("only one table is supported".to_string()),
         }
@@ -184,7 +181,7 @@ impl RivieraPlanner {
 
     fn build_select_exprs(
         &self,
-        items: &Vec<SelectItem>,
+        items: &[SelectItem],
         schema: &Schema,
     ) -> Result<Vec<Expr>, String> {
         items
@@ -195,7 +192,7 @@ impl RivieraPlanner {
 
     fn project(
         &self,
-        exprs: &Vec<Expr>,
+        exprs: &[Expr],
         input: &LogicalPlan,
         schema: &Schema,
     ) -> Result<LogicalPlan, String> {
@@ -206,7 +203,7 @@ impl RivieraPlanner {
         let schema = Schema::new(fields);
 
         Ok(LogicalPlan::Projection(Projection {
-            expr: exprs.clone(),
+            expr: Vec::from(exprs),
             input: Box::new(input.clone()),
             schema: Box::new(schema),
         }))
@@ -224,7 +221,7 @@ mod test {
     use super::*;
 
     fn logical_plan(sql: &str) -> LogicalPlan {
-        let ast = Parser::parse_sql(&PostgreSqlDialect {}, &sql).unwrap();
+        let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
         let statement = ast[0].clone();
         let provider = TableProvider::new(HashMap::from([
             (

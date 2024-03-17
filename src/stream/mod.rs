@@ -1,6 +1,8 @@
 // adjacency list representation of a graph
 use std::{collections::HashMap, fmt::Debug};
 
+use crate::tree::VisitRecursion;
+
 #[derive(Debug)]
 struct Vertex<T> {
     pub weight: T,
@@ -70,7 +72,7 @@ where
         &self.nodes.get(&index).unwrap().weight
     }
 
-    pub fn get_weight_mut(&mut self, index: usize) -> &mut N {
+    pub fn get_node_weight_mut(&mut self, index: usize) -> &mut N {
         &mut self.nodes.get_mut(&index).unwrap().weight
     }
 
@@ -149,6 +151,150 @@ where
         }
         neighbors
     }
+
+    pub fn check_for_cycles(&self, index: usize) -> bool {
+        let mut visited = HashMap::new();
+        self.check_for_cycles_rec(index, &mut visited)
+    }
+
+    pub fn check_for_global_cycles(&self) -> bool {
+        let mut visited = HashMap::new();
+        for &index in self.nodes.keys() {
+            if self.check_for_cycles_rec(index, &mut visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn check_for_cycles_rec(&self, index: usize, visited: &mut HashMap<usize, bool>) -> bool {
+        if let Some(&is_visited) = visited.get(&index) {
+            return is_visited;
+        }
+
+        visited.insert(index, true);
+
+        for &edge_index in &self.nodes.get(&index).unwrap().edges {
+            let edge = &self.edges.get(&edge_index).unwrap();
+            let neighbor_index = if edge.node[0] == index {
+                edge.node[1]
+            } else {
+                continue;
+            };
+
+            if self.check_for_cycles_rec(neighbor_index, visited) {
+                return true;
+            }
+        }
+
+        visited.insert(index, false);
+        false
+    }
+
+    pub fn visit<V: NodeVisitor<N = N>>(
+        &self,
+        index: usize,
+        visitor: &mut V,
+    ) -> Result<VisitRecursion, String> {
+        let mut visited = HashMap::new();
+        if self.visit_rec(index, visitor, &mut visited)? == VisitRecursion::Stop {
+            return Ok(VisitRecursion::Stop);
+        }
+        Ok(VisitRecursion::Continue)
+    }
+
+    fn visit_rec<V: NodeVisitor<N = N>>(
+        &self,
+        index: usize,
+        visitor: &mut V,
+        visited: &mut HashMap<usize, bool>,
+    ) -> Result<VisitRecursion, String> {
+        if let Some(&is_visited) = visited.get(&index) {
+            return if is_visited {
+                Ok(VisitRecursion::Continue)
+            } else {
+                Ok(VisitRecursion::SkipChildren)
+            };
+        }
+
+        visited.insert(index, true);
+
+        match visitor.pre_visit(self.get_node_weight(index))? {
+            VisitRecursion::Continue => {}
+            VisitRecursion::SkipChildren => {
+                visited.insert(index, false);
+                return Ok(VisitRecursion::Continue);
+            }
+            VisitRecursion::Stop => {
+                visited.insert(index, false);
+                return Ok(VisitRecursion::Stop);
+            }
+        };
+
+        for &edge_index in &self.nodes.get(&index).unwrap().edges {
+            let edge = &self.edges.get(&edge_index).unwrap();
+            let neighbor_index = if edge.node[0] == index {
+                edge.node[1]
+            } else {
+                continue;
+            };
+
+            if self.visit_rec(neighbor_index, visitor, visited)? == VisitRecursion::Stop {
+                return Ok(VisitRecursion::Stop);
+            }
+        }
+
+        match visitor.post_visit(self.get_node_weight(index))? {
+            VisitRecursion::Continue => {}
+            VisitRecursion::SkipChildren => {
+                visited.insert(index, false);
+                return Ok(VisitRecursion::Continue);
+            }
+            VisitRecursion::Stop => {
+                visited.insert(index, false);
+                return Ok(VisitRecursion::Stop);
+            }
+        };
+
+        visited.insert(index, false);
+        Ok(VisitRecursion::Continue)
+    }
+}
+
+struct PrintVisitor<N> {
+    _phantom: std::marker::PhantomData<N>,
+}
+
+impl PrintVisitor<&str> {
+    pub fn new() -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+trait NodeVisitor {
+    type N;
+
+    fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion, String>;
+    fn post_visit(&mut self, node: &Self::N) -> Result<VisitRecursion, String>;
+}
+
+impl<N> NodeVisitor for PrintVisitor<N>
+where
+    N: Debug,
+{
+    type N = N;
+
+    fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion, String> {
+        println!("pre_visit: {:?}", node);
+        Ok(VisitRecursion::Continue)
+    }
+
+    fn post_visit(&mut self, node: &Self::N) -> Result<VisitRecursion, String> {
+        println!("post_visit: {:?}", node);
+        Ok(VisitRecursion::Continue)
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +320,19 @@ mod test {
         neighbors_directed.sort();
         assert_eq!(neighbors_directed.len(), 3);
         assert_eq!(neighbors_directed, vec![b, c, d]);
+
+        assert!(!graph.check_for_cycles(a));
+        assert!(!graph.check_for_global_cycles());
+
+        let e6 = graph.add_edge((), b, a);
+
+        assert!(graph.check_for_cycles(a));
+        assert!(graph.check_for_global_cycles());
+
+        graph.remove_edge(e6);
+
+        assert!(!graph.check_for_cycles(a));
+        assert!(!graph.check_for_global_cycles());
 
         let mut neighbors = graph.get_neighbors(b);
         neighbors.sort();

@@ -18,7 +18,7 @@ fn main() {
     // let sql = "SELECT name FROM posts LEFT JOIN (SELECT post_id, COUNT(*) AS postcount FROM likes GROUP BY post_id) AS likes ON posts.id = likes.post_id ";
     // let sql = "SELECT post_id, COUNT(*) AS postcount FROM likes GROUP BY post_id;";
     // let sql = "SELECT name FROM posts;";
-    let ast = Parser::parse_sql(&PostgreSqlDialect {}, &sql).unwrap();
+    let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
     let statement = ast[0].clone();
     println!("{:#?}", statement);
 

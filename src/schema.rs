@@ -30,7 +30,7 @@ impl Schema {
 
     pub fn merge(&mut self, other: &Self) -> Self {
         for field in &other.fields {
-            if self.fields.contains(&field) {
+            if self.fields.contains(field) {
                 continue;
             }
             self.fields.push(field.clone());
@@ -42,9 +42,7 @@ impl Schema {
         let new_fields = self
             .fields
             .iter()
-            .map(|f| {
-                Field::new_with_qualifier(Some(qualifier), &f.name, f.data_type.clone(), f.nullable)
-            })
+            .map(|f| Field::new_with_qualifier(Some(qualifier), &f.name, f.data_type, f.nullable))
             .collect::<Vec<_>>();
         Self { fields: new_fields }
     }
@@ -53,7 +51,7 @@ impl Schema {
         let fields = self
             .fields
             .iter()
-            .map(|f| format!("{}", f.name))
+            .map(|f| f.name.to_string())
             .collect::<Vec<_>>();
         format!("Schema({})", fields.join(", "))
     }
@@ -109,12 +107,9 @@ impl TableProvider {
                     .map(|f| match &f.qualifier {
                         //TODO: there could be multiple levels of qualifiers
                         Some(..) => f.clone(),
-                        None => Field::new_with_qualifier(
-                            Some(name),
-                            &f.name,
-                            f.data_type.clone(),
-                            f.nullable,
-                        ),
+                        None => {
+                            Field::new_with_qualifier(Some(name), &f.name, f.data_type, f.nullable)
+                        }
                     })
                     .collect::<Vec<_>>();
                 (name.clone(), Schema { fields: new_schema })

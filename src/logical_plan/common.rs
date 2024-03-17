@@ -58,11 +58,11 @@ pub fn sql_item_to_expr(item: &SelectItem, schema: &Schema) -> Result<Expr, Stri
             let expr = sql_expr_to_logical_expr(expr, schema)?;
             Ok(Expr::Alias(Alias::new(expr, alias.value.as_str())))
         }
-        _ => return Err("only column names are implemented".to_string()),
+        _ => Err("only column names are implemented".to_string()),
     }
 }
 
-pub fn rebase_expr(expr: &Expr, base_exprs: &Vec<Expr>) -> Result<Expr, String> {
+pub fn rebase_expr(expr: &Expr, base_exprs: &[Expr]) -> Result<Expr, String> {
     expr.clone().transform_down(&mut |nested_expr| {
         if base_exprs.contains(nested_expr) {
             Ok(expr_as_column(nested_expr)?)

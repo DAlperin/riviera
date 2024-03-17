@@ -55,6 +55,7 @@ pub trait TreeNode: Sized {
         F: FnMut(&Self) -> Result<Self, String>;
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum VisitRecursion {
     Continue,
     SkipChildren,
