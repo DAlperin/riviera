@@ -42,7 +42,10 @@ impl RivieraPlanner {
     }
 
     fn plan_select(&self, select: Select) -> Result<LogicalPlan, String> {
-        let from = self.plan_from(&select.from).unwrap();
+        let from = match self.plan_from(&select.from) {
+            Ok(from) => from,
+            Err(e) => return Err(e),
+        };
         let select_exprs = self.build_select_exprs(&select.projection, from.schema())?;
         let agg_exprs = find_exprs_in_exprs(&select_exprs, |expr| {
             matches!(expr, Expr::AggregateFunction(_))
@@ -220,7 +223,7 @@ mod test {
 
     use super::*;
 
-    fn logical_plan(sql: &str) -> LogicalPlan {
+    fn logical_plan(sql: &str) -> Result<LogicalPlan, String> {
         let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
         let statement = ast[0].clone();
         let provider = TableProvider::new(HashMap::from([
@@ -242,12 +245,12 @@ mod test {
 
         let planner = RivieraPlanner::new(provider);
 
-        planner.plan_statement(statement).unwrap()
+        planner.plan_statement(statement)
     }
 
     #[test]
     fn test_simple_select() {
-        let plan = logical_plan("SELECT name FROM posts");
+        let plan = logical_plan("SELECT name FROM posts").unwrap();
 
         assert_eq!(
             format!("{plan}"),
@@ -257,8 +260,22 @@ mod test {
     }
 
     #[test]
+    fn test_non_existent_table() {
+        let plan = logical_plan("SELECT name FROM missing_table").unwrap_err();
+
+        assert_eq!(plan, "no table named missing_table");
+    }
+
+    #[test]
+    fn test_non_existing_column() {
+        let plan = logical_plan("SELECT missing_column FROM posts").unwrap_err();
+
+        assert_eq!(plan, "no column named missing_column");
+    }
+
+    #[test]
     fn test_basic_alias() {
-        let plan = logical_plan("SELECT name AS n FROM posts");
+        let plan = logical_plan("SELECT name AS n FROM posts").unwrap();
 
         assert_eq!(
             format!("{plan}"),
@@ -270,7 +287,8 @@ mod test {
     #[test]
     fn test_basic_join() {
         let plan =
-            logical_plan("SELECT name FROM posts LEFT JOIN likes ON posts.id = likes.post_id");
+            logical_plan("SELECT name FROM posts LEFT JOIN likes ON posts.id = likes.post_id")
+                .unwrap();
 
         assert_eq!(
             format!("{plan}"),
@@ -283,7 +301,7 @@ mod test {
 
     #[test]
     fn test_simple_subquery() {
-        let plan = logical_plan("SELECT name FROM (SELECT name FROM posts) AS posts");
+        let plan = logical_plan("SELECT name FROM (SELECT name FROM posts) AS posts").unwrap();
 
         assert_eq!(
             format!("{plan}"),
@@ -297,7 +315,8 @@ mod test {
     #[test]
     fn test_simple_aggregate() {
         let plan =
-            logical_plan("SELECT post_id, COUNT(*) AS postcount FROM likes GROUP BY post_id");
+            logical_plan("SELECT post_id, COUNT(*) AS postcount FROM likes GROUP BY post_id")
+                .unwrap();
 
         assert_eq!(
             format!("{plan}"),
@@ -311,7 +330,7 @@ mod test {
     fn test_complex_query() {
         let plan = logical_plan(
             "SELECT name, postcount FROM posts LEFT JOIN (SELECT post_id, COUNT(id) AS postcount FROM likes GROUP BY post_id) AS likes ON posts.id = likes.post_id",
-        );
+        ).unwrap();
 
         assert_eq!(
             format!("{plan}"),

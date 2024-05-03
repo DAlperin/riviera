@@ -55,6 +55,25 @@ impl Schema {
             .collect::<Vec<_>>();
         format!("Schema({})", fields.join(", "))
     }
+
+    pub fn column(&self, index: usize) -> Field {
+        self.fields[index].clone()
+    }
+
+    pub fn to_arrow(&self) -> arrow_schema::Schema {
+        let fields = self
+            .fields
+            .iter()
+            .map(|f| {
+                let arrow_type = match f.data_type {
+                    DataType::Int32 => arrow_schema::DataType::Int32,
+                    DataType::Utf8 => arrow_schema::DataType::Utf8,
+                };
+                arrow_schema::Field::new(&f.name, arrow_type, f.nullable)
+            })
+            .collect::<Vec<_>>();
+        arrow_schema::Schema::new(fields)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

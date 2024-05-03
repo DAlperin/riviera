@@ -128,17 +128,11 @@ impl TreeNode for Expr {
         Ok(match self {
             Self::Column(_) => self.clone(),
             Self::AggregateFunction(AggregateFunction { args, kind }) => {
-                let args = args
-                    .iter()
-                    .map(|arg| f(arg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Self::AggregateFunction(AggregateFunction::new(kind.clone(), args))
+                let args = args.iter().map(f).collect::<Result<Vec<_>, _>>()?;
+                Self::AggregateFunction(AggregateFunction::new(*kind, args))
             }
             Self::Function(Function { args, name }) => {
-                let args = args
-                    .iter()
-                    .map(|arg| f(arg))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let args = args.iter().map(f).collect::<Result<Vec<_>, _>>()?;
                 Self::Function(Function::new(name, args))
             }
             Self::Alias(alias) => {
@@ -148,7 +142,7 @@ impl TreeNode for Expr {
             Self::BinaryExpr(expr) => {
                 let left = f(&expr.left)?;
                 let right = f(&expr.right)?;
-                Self::BinaryExpr(BinaryExpr::new(left, expr.op.clone(), right))
+                Self::BinaryExpr(BinaryExpr::new(left, expr.op, right))
             }
             Self::Wildcard => self.clone(),
         })
@@ -177,9 +171,9 @@ impl Expr {
             Self::AggregateFunction(agg) => match agg.kind {
                 AggregateFunctionKind::Count => false,
             },
-            Self::Function(func) => match func.name.as_str() {
-                _ => unimplemented!(),
-            },
+            Self::Function(_) => {
+                unimplemented!()
+            }
             Self::Alias(alias) => alias.expr.nullable(schema),
             Self::BinaryExpr(expr) => {
                 let left_nullable = expr.left.nullable(schema);
@@ -207,9 +201,9 @@ impl Expr {
             Self::AggregateFunction(agg) => match agg.kind {
                 AggregateFunctionKind::Count => DataType::Int32,
             },
-            Self::Function(func) => match func.name.as_str() {
-                _ => unimplemented!(),
-            },
+            Self::Function(_) => {
+                unimplemented!()
+            }
             Self::Alias(alias) => alias.expr.get_type(schema),
             Self::BinaryExpr(expr) => {
                 let left_type = expr.left.get_type(schema);

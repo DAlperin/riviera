@@ -9,6 +9,7 @@ use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
 pub mod expr;
 pub mod logical_plan;
+pub mod physical_expr;
 pub mod schema;
 pub mod stream;
 pub mod tree;
