@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use arrow::datatypes::SchemaRef;
+
 use crate::expr::DataType;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,19 +62,20 @@ impl Schema {
         self.fields[index].clone()
     }
 
-    pub fn to_arrow(&self) -> arrow_schema::Schema {
+    pub fn to_arrow(&self) -> SchemaRef {
         let fields = self
             .fields
             .iter()
             .map(|f| {
                 let arrow_type = match f.data_type {
-                    DataType::Int32 => arrow_schema::DataType::Int32,
-                    DataType::Utf8 => arrow_schema::DataType::Utf8,
+                    DataType::Int32 => arrow::datatypes::DataType::Int32,
+                    DataType::Utf8 => arrow::datatypes::DataType::Utf8,
                 };
-                arrow_schema::Field::new(&f.name, arrow_type, f.nullable)
+                arrow::datatypes::Field::new(&f.name, arrow_type, f.nullable)
             })
             .collect::<Vec<_>>();
-        arrow_schema::Schema::new(fields)
+        let schema = arrow::datatypes::Schema::new(fields);
+        SchemaRef::new(schema)
     }
 }
 

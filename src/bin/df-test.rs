@@ -22,7 +22,7 @@ fn main() {
     // let sql = "SELECT post_id, COUNT(*) AS postcount FROM likes GROUP BY post_id;";
     // let sql = "SELECT posts.name, COUNT(likes.id) FROM posts LEFT JOIN likes ON posts.id = likes.post_id GROUP BY posts.name;";
 
-    let sql = "SELECT name FROM posts LEFT JOIN (SELECT post_id, COUNT(id) AS postcount FROM likes GROUP BY post_id) AS likes ON posts.id = likes.post_id";
+    let sql = "SELECT name, postcount * 2 FROM posts LEFT JOIN (SELECT post_id, COUNT(id) AS postcount FROM likes GROUP BY post_id) AS likes ON posts.id = likes.post_id";
 
     // parse the SQL
     let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...

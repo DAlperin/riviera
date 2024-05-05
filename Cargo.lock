@@ -434,12 +434,6 @@ checksum = "5d1d179c117b158853e0101bfbed5615e86fe97ee356b4af901f1c5001e1ce4b"
 
 [[package]]
 name = "arrow-schema"
-version = "49.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09e28a5e781bf1b0f981333684ad13f5901f4cd2f20589eab7cf1797da8fc167"
-
-[[package]]
-name = "arrow-schema"
 version = "51.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02d9483aaabe910c4781153ae1b6ae0393f72d9ef757d38d09d450070cf2e528"
@@ -1042,6 +1036,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1316,7 +1319,7 @@ dependencies = [
  "chrono",
  "futures",
  "humantime",
- "itertools",
+ "itertools 0.11.0",
  "parking_lot",
  "percent-encoding",
  "snafu",
@@ -1557,13 +1560,14 @@ name = "riviera"
 version = "0.1.0"
 dependencies = [
  "arrow 51.0.0",
- "arrow-schema 49.0.0",
+ "arrow-schema 51.0.0",
  "async-stream",
  "async-trait",
  "datafusion-common",
  "datafusion-expr",
  "datafusion-sql",
  "futures",
+ "itertools 0.12.1",
  "sqlparser",
  "tokio",
 ]
