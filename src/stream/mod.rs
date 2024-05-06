@@ -1,13 +1,12 @@
-use core::hash;
 use std::{
     collections::{BTreeMap, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
+    ops::Add,
 };
 
 use arrow::{
-    array::{Array, ArrayRef, Int32Array, RecordBatch},
-    compute::{partition, sort_to_indices, take},
-    downcast_primitive_array,
+    array::{new_null_array, ArrayRef, Int32Array, Int64Array, RecordBatch},
+    compute::{concat_batches, take},
 };
 use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
@@ -75,7 +74,18 @@ struct Projection {
 
 #[async_trait]
 impl DataflowNode for Projection {
-    async fn handle_watermark(&self, context: &mut Context, idx: usize, watermark: usize) {}
+    async fn handle_watermark(&self, context: &mut Context, idx: usize, watermark: usize) {
+        let min_watermark = context.watermarks.watermarks.iter().min().unwrap();
+        if *min_watermark > context.watermarks.current_watermark {
+            context.watermarks.current_watermark = *min_watermark;
+            for out in &context.outs {
+                out.send(StreamMessage::Control(ControlMessage::Watermark(
+                    *min_watermark,
+                )))
+                .unwrap();
+            }
+        }
+    }
 
     async fn handle_control_message(&self, context: &mut Context, message: ControlMessage) {}
 
@@ -125,16 +135,8 @@ struct InstantJoin {
     right_batch: RecordBatch,
     right_offset: usize,
 
-    //Map from join key to record batches sorted by timestamp
-    // left_state: HashMap<u64, BTreeMap<usize, Vec<RecordBatch>>>,
-    // right_state: HashMap<u64, BTreeMap<usize, Vec<RecordBatch>>>,
-
-    //Map from join key to record batch indices sorted by timestamp
     left_hashmap: HashMap<u64, BTreeMap<usize, Vec<u64>>>,
     right_hashmap: HashMap<u64, BTreeMap<usize, Vec<u64>>>,
-    //Intermediate state for records that have been removed
-    // left_deleted: HashMap<u64, BTreeMap<usize, Vec<RecordBatch>>>,
-    // right_deleted: HashMap<u64, BTreeMap<usize, Vec<RecordBatch>>>,
 }
 
 fn create_hashes(arrays: &[ArrayRef], hashes_buffer: &mut Vec<u64>) -> Vec<u64> {
@@ -165,7 +167,105 @@ fn create_hashes(arrays: &[ArrayRef], hashes_buffer: &mut Vec<u64>) -> Vec<u64> 
 
 #[async_trait]
 impl DataflowNode for InstantJoin {
-    async fn handle_watermark(&self, context: &mut Context, idx: usize, watermark: usize) {}
+    async fn handle_watermark(&self, context: &mut Context, _idx: usize, _watermark: usize) {
+        let min_watermark = context.watermarks.watermarks.iter().min().unwrap();
+        if *min_watermark > context.watermarks.current_watermark {
+            let prev = context.watermarks.current_watermark;
+            context.watermarks.current_watermark = *min_watermark;
+
+            match self.join_type {
+                JoinType::Left => {
+                    let left: Vec<_> = self
+                        .left_hashmap
+                        .iter()
+                        .flat_map(|(k, v)| {
+                            v.iter()
+                                .filter(|(ts, _)| **ts > prev && **ts <= *min_watermark)
+                                .map(|(ts, v)| (k, (ts, v)))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+
+                    // For left joins, for every record on the left we attempt to find a match on the right
+                    // If we don't find a match we need to emit a record with nulls for the right side
+                    for (key, (_, left)) in left {
+                        //Find the corresponding right records
+                        let default = BTreeMap::new();
+                        let right = self.right_hashmap.get(key).unwrap_or(&default);
+                        //Filter the right records to timestamps in the correct range
+                        let right = right
+                            .iter()
+                            .filter(|(ts, _)| **ts > prev && **ts <= *min_watermark)
+                            .flat_map(|(_, v)| v.clone())
+                            .collect::<Vec<_>>();
+
+                        let mut left_columns = Vec::new();
+                        for col in self.left_batch.columns() {
+                            let indices: Int64Array = left.iter().map(|&x| x as i64).collect();
+                            let c = take(col, &indices, None).unwrap();
+                            left_columns.push(c);
+                        }
+
+                        let left = RecordBatch::try_new(self.left_schema.to_arrow(), left_columns)
+                            .unwrap();
+
+                        let mut right_columns = Vec::new();
+                        //If there are no right records we need to emit a record with nulls
+                        if right.is_empty() {
+                            for _ in 0..left.num_rows() {
+                                for field in self.right_schema.to_arrow().fields() {
+                                    let array = new_null_array(field.data_type(), left.num_rows());
+                                    right_columns.push(array);
+                                }
+                            }
+                        } else {
+                            for col in self.right_batch.columns() {
+                                let indices: Int64Array = right.iter().map(|&x| x as i64).collect();
+                                let c = take(col, &indices, None).unwrap();
+                                right_columns.push(c);
+                            }
+                        }
+
+                        //For each left record we need to emit a combined record with the right record
+                        let right =
+                            RecordBatch::try_new(self.right_schema.to_arrow(), right_columns)
+                                .unwrap();
+
+                        assert!(left.num_rows() == right.num_rows());
+
+                        let combined_columns = left
+                            .columns()
+                            .iter()
+                            .chain(right.columns().iter())
+                            .cloned()
+                            .collect();
+                        let combined_batch =
+                            RecordBatch::try_new(self.output_schema.to_arrow(), combined_columns)
+                                .unwrap();
+
+                        for out in &context.outs {
+                            out.send(StreamMessage::Data((
+                                Action::Add,
+                                Record {
+                                    timestamp: *min_watermark,
+                                    data: combined_batch.clone(),
+                                },
+                            )))
+                            .unwrap();
+                        }
+                    }
+                }
+                _ => unimplemented!(),
+            };
+            // Send updated watermark
+            for out in &context.outs {
+                out.send(StreamMessage::Control(ControlMessage::Watermark(
+                    *min_watermark,
+                )))
+                .unwrap();
+            }
+        }
+    }
     async fn handle_control_message(&self, context: &mut Context, message: ControlMessage) {}
     async fn handle_recordbatch(&mut self, context: &mut Context, idx: usize, record: Change) {
         let (action, record) = record;
@@ -181,11 +281,6 @@ impl DataflowNode for InstantJoin {
             _ => unimplemented!(),
         };
 
-        match on.len() {
-            1 => {}
-            _ => unimplemented!("Only single column joins are supported"),
-        }
-
         let keys: Vec<_> = on
             .iter()
             .map(|expr| expr.evalutate(&record.data).unwrap())
@@ -199,9 +294,19 @@ impl DataflowNode for InstantJoin {
 
         match action {
             Action::Add => {
-                let hashmap = match idx {
-                    0 => &mut self.left_hashmap,
-                    1 => &mut self.right_hashmap,
+                let (hashmap, batch, offset, schema) = match idx {
+                    0 => (
+                        &mut self.left_hashmap,
+                        &mut self.left_batch,
+                        &mut self.left_offset,
+                        &self.left_schema,
+                    ),
+                    1 => (
+                        &mut self.right_hashmap,
+                        &mut self.right_batch,
+                        &mut self.right_offset,
+                        &self.right_schema,
+                    ),
                     _ => unimplemented!(),
                 };
                 // Insert into hashmap
@@ -210,20 +315,12 @@ impl DataflowNode for InstantJoin {
                     let entry = entry.entry(record.timestamp).or_insert_with(Vec::new);
                     entry.push(row as u64);
                 }
-                println!("{:?}", hashmap);
+
+                *batch = concat_batches(&schema.to_arrow(), [&batch, &record.data].iter().cloned())
+                    .unwrap();
+                *offset = offset.add(record.data.num_rows());
             }
             Action::Remove => {}
-        }
-
-        for out in &context.outs {
-            out.send(StreamMessage::Data((
-                action.clone(),
-                Record {
-                    timestamp: record.timestamp,
-                    data: record.data.clone(),
-                },
-            )))
-            .unwrap();
         }
     }
 }
@@ -232,20 +329,12 @@ impl DataflowNode for InstantJoin {
 trait DataflowNode {
     async fn handle_watermark(&self, context: &mut Context, idx: usize, watermark: usize);
     async fn handle_watermark_int(&mut self, context: &mut Context, idx: usize, watermark: usize) {
-        if watermark <= context.watermarks.watermarks[idx] {
+        if watermark <= context.watermarks.watermarks[idx]
+            || watermark <= context.watermarks.current_watermark
+        {
             return;
         }
         context.watermarks.watermarks[idx] = watermark;
-        let min_watermark = context.watermarks.watermarks.iter().min().unwrap();
-        if *min_watermark > context.watermarks.current_watermark {
-            context.watermarks.current_watermark = *min_watermark;
-            for out in &context.outs {
-                out.send(StreamMessage::Control(ControlMessage::Watermark(
-                    *min_watermark,
-                )))
-                .unwrap();
-            }
-        }
         self.handle_watermark(context, idx, watermark).await;
     }
     async fn handle_control_message(&self, context: &mut Context, message: ControlMessage);
@@ -293,7 +382,15 @@ trait DataflowNode {
 mod test {
     use std::sync::Arc;
 
-    use crate::{expr::DataType, schema::Field};
+    use arrow::{
+        array::{Int32Array, RecordBatch, StringArray, UInt8Array},
+        compute::{interleave, kernels::interleave, take},
+    };
+
+    use crate::{
+        expr::DataType,
+        schema::{Field, Schema},
+    };
 
     #[tokio::test]
     async fn test_project_node() {
@@ -437,17 +534,32 @@ mod test {
             Field::new("f", DataType::Int32, true),
         ]);
 
+        let combined_schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+            Field::new("c", DataType::Int32, true),
+            Field::new("d", DataType::Int32, true),
+            Field::new("e", DataType::Int32, true),
+            Field::new("f", DataType::Int32, true),
+        ]);
+
         let mut join = InstantJoin {
             left_schema: left_schema.clone(),
             right_schema: right_schema.clone(),
-            output_schema: Schema::new(vec![Field::new("a", DataType::Int32, true)]),
+            output_schema: combined_schema,
 
             on: (
-                vec![Expr::Column(Column::new("a", 0))],
-                vec![Expr::Column(Column::new("d", 0))],
+                vec![
+                    Expr::Column(Column::new("a", 0)),
+                    Expr::Column(Column::new("b", 0)),
+                ],
+                vec![
+                    Expr::Column(Column::new("d", 0)),
+                    Expr::Column(Column::new("e", 0)),
+                ],
             ),
 
-            join_type: JoinType::Inner,
+            join_type: JoinType::Left,
 
             left_batch: RecordBatch::new_empty(left_schema.to_arrow()),
             right_batch: RecordBatch::new_empty(right_schema.to_arrow()),
@@ -457,11 +569,6 @@ mod test {
 
             left_offset: 0,
             right_offset: 0,
-            // left_state: HashMap::new(),
-            // right_state: HashMap::new(),
-
-            // right_deleted: HashMap::new(),
-            // left_deleted: HashMap::new(),
         };
 
         let (left_tx, left_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -479,9 +586,9 @@ mod test {
         let left_record = RecordBatch::try_new(
             left_schema.to_arrow(),
             vec![
-                Arc::new(Int32Array::from(vec![49, 4, 7, 7])),
-                Arc::new(Int32Array::from(vec![2, 5, 8, 12])),
-                Arc::new(Int32Array::from(vec![3, 6, 9, 13])),
+                Arc::new(Int32Array::from(vec![49, 4, 7, 7, 91])),
+                Arc::new(Int32Array::from(vec![2, 5, 8, 12, 92])),
+                Arc::new(Int32Array::from(vec![3, 6, 9, 13, 93])),
             ],
         );
 
@@ -492,12 +599,219 @@ mod test {
 
         let left_record = (Action::Add, left_record);
 
+        let right_record = RecordBatch::try_new(
+            right_schema.to_arrow(),
+            vec![
+                Arc::new(Int32Array::from(vec![49, 4, 7, 7])),
+                Arc::new(Int32Array::from(vec![2, 5, 8, 12])),
+                Arc::new(Int32Array::from(vec![3, 6, 9, 13])),
+            ],
+        );
+
+        let right_record = Record {
+            timestamp: 1,
+            data: right_record.unwrap(),
+        };
+
+        let right_record = (Action::Add, right_record);
+
         tokio::spawn(async move {
             join.run(&mut context, vec![left_rx, right_rx]).await;
         });
 
         left_tx.send(StreamMessage::Data(left_record)).unwrap();
+        right_tx.send(StreamMessage::Data(right_record)).unwrap();
+        left_tx
+            .send(StreamMessage::Control(ControlMessage::Watermark(1)))
+            .unwrap();
+        right_tx
+            .send(StreamMessage::Control(ControlMessage::Watermark(1)))
+            .unwrap();
 
-        output_rx.recv().await.unwrap();
+        let message = output_rx.recv().await.unwrap();
+        println!("{:?}", message);
+
+        let message = output_rx.recv().await.unwrap();
+        println!("{:?}", message);
+
+        let message = output_rx.recv().await.unwrap();
+        println!("{:?}", message);
+
+        let message = output_rx.recv().await.unwrap();
+        println!("{:?}", message);
+    }
+
+    #[tokio::test]
+    async fn join_into_project() {
+        use super::*;
+        let posts_schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+
+        let likes_schema = Schema::new(vec![
+            Field::new("like_id", DataType::Int32, true),
+            Field::new("post_id", DataType::Int32, true),
+        ]);
+
+        let combined_schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("like_id", DataType::Int32, true),
+            Field::new("post_id", DataType::Int32, true),
+        ]);
+
+        let mut join = InstantJoin {
+            left_schema: posts_schema.clone(),
+            right_schema: likes_schema.clone(),
+            output_schema: combined_schema,
+
+            on: (
+                vec![Expr::Column(Column::new("id", 0))],
+                vec![Expr::Column(Column::new("post_id", 1))],
+            ),
+
+            join_type: JoinType::Left,
+
+            left_batch: RecordBatch::new_empty(posts_schema.to_arrow()),
+            right_batch: RecordBatch::new_empty(likes_schema.to_arrow()),
+
+            left_hashmap: HashMap::new(),
+            right_hashmap: HashMap::new(),
+
+            left_offset: 0,
+            right_offset: 0,
+        };
+
+        let (posts_tx, posts_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (likes_tx, likes_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut join_context = Context {
+            outs: vec![output_tx],
+            watermarks: WatermarkHolder {
+                current_watermark: 0,
+                watermarks: vec![0, 0],
+            },
+        };
+
+        let projected_schema = Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("like_id", DataType::Int32, true),
+        ]);
+
+        let mut project = Projection {
+            expr: vec![
+                Expr::Column(Column::new("name", 1)),
+                Expr::Column(Column::new("like_id", 2)),
+            ],
+            output_schema: projected_schema.clone(),
+        };
+
+        let (project_output_tx, mut project_output_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut project_context = Context {
+            outs: vec![project_output_tx],
+            watermarks: WatermarkHolder {
+                current_watermark: 0,
+                watermarks: vec![0],
+            },
+        };
+
+        let posts_record = RecordBatch::try_new(
+            posts_schema.to_arrow(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+                Arc::new(StringArray::from(vec!["hello", "world", "this", "that"])),
+            ],
+        );
+
+        let posts_record = Record {
+            timestamp: 1,
+            data: posts_record.unwrap(),
+        };
+
+        let posts_record = (Action::Add, posts_record);
+
+        let likes_record = RecordBatch::try_new(
+            likes_schema.to_arrow(),
+            vec![
+                Arc::new(Int32Array::from(vec![20, 21, 22, 23])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+            ],
+        );
+
+        let likes_record = Record {
+            timestamp: 1,
+            data: likes_record.unwrap(),
+        };
+
+        let likes_record = (Action::Add, likes_record);
+
+        tokio::spawn(async move {
+            join.run(&mut join_context, vec![posts_rx, likes_rx]).await;
+        });
+
+        tokio::spawn(async move {
+            project.run(&mut project_context, vec![output_rx]).await;
+        });
+
+        posts_tx.send(StreamMessage::Data(posts_record)).unwrap();
+        likes_tx.send(StreamMessage::Data(likes_record)).unwrap();
+        posts_tx
+            .send(StreamMessage::Control(ControlMessage::Watermark(1)))
+            .unwrap();
+        likes_tx
+            .send(StreamMessage::Control(ControlMessage::Watermark(1)))
+            .unwrap();
+
+        let message = project_output_rx.recv().await.unwrap();
+        println!("{:?}", message);
+    }
+
+    #[tokio::test]
+    async fn fucking_around() {
+        let left_schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+            Field::new("c", DataType::Int32, true),
+        ]);
+
+        let right_schema = Schema::new(vec![
+            Field::new("d", DataType::Int32, true),
+            Field::new("e", DataType::Int32, true),
+            Field::new("f", DataType::Int32, true),
+        ]);
+
+        let combined_schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+            Field::new("c", DataType::Int32, true),
+            Field::new("d", DataType::Int32, true),
+            Field::new("e", DataType::Int32, true),
+            Field::new("f", DataType::Int32, true),
+        ]);
+
+        let left_record = RecordBatch::try_new(
+            left_schema.to_arrow(),
+            vec![
+                Arc::new(Int32Array::from(vec![49, 4, 7, 7])),
+                Arc::new(Int32Array::from(vec![2, 5, 8, 12])),
+                Arc::new(Int32Array::from(vec![3, 6, 9, 13])),
+            ],
+        )
+        .unwrap();
+
+        let indices = vec![0];
+        let indices = Int32Array::from(indices);
+        let mut cols = Vec::new();
+        for col in left_record.columns() {
+            let c = take(col, &indices, None).unwrap();
+            cols.push(c);
+            //find the row with the value 2
+        }
+
+        let new_batch = RecordBatch::try_new(left_schema.to_arrow(), cols).unwrap();
+        println!("{:?}", new_batch);
     }
 }
